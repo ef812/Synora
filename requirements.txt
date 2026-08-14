@@ -1,0 +1,12 @@
+langgraph
+langchain
+langchain-community
+langchain-chroma
+langchain-huggingface
+chromadb
+sentence-transformers
+pydantic
+groq
+python-dotenv
+fastapi
+uvicorn[standard]
