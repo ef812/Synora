@@ -1,31 +1,9 @@
 import os
+import zipfile
 import requests
 
 DB_PATH = os.getenv("CHROMA_DB_PATH", "db")
-DOCS_PATH = "docs"
-
-# Map of filename -> direct download URL
-PDF_SOURCES = {
-    "medical1.pdf": "https://drive.google.com/uc?export=download&id=YOUR_FILE_ID_1",
-    "medical2.pdf": "https://drive.google.com/uc?export=download&id=YOUR_FILE_ID_2",
-    "medical3.pdf": "",
-    "medical4.pdf": "",
-    "medical5.pdf": "",
-}
-
-
-def download_pdfs():
-    os.makedirs(DOCS_PATH, exist_ok=True)
-    for filename, url in PDF_SOURCES.items():
-        filepath = os.path.join(DOCS_PATH, filename)
-        if os.path.exists(filepath):
-            continue
-        print(f"Downloading {filename}...")
-        response = requests.get(url)
-        response.raise_for_status()
-        with open(filepath, "wb") as f:
-            f.write(response.content)
-        print(f"Saved {filename}")
+DB_ZIP_URL = os.getenv("DB_ZIP_URL")  # set this in Railway variables
 
 
 def db_is_populated() -> bool:
@@ -33,12 +11,27 @@ def db_is_populated() -> bool:
     return os.path.exists(sqlite_path) and os.path.getsize(sqlite_path) > 1_000_000
 
 
+def download_and_extract_db():
+    print("Downloading pre-built database...")
+    response = requests.get(DB_ZIP_URL, stream=True)
+    response.raise_for_status()
+
+    zip_path = "db.zip"
+    with open(zip_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    print("Extracting...")
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        zip_ref.extractall(os.path.dirname(DB_PATH) or ".")
+
+    os.remove(zip_path)
+    print("Database ready.")
+
+
 if __name__ == "__main__":
     if db_is_populated():
-        print("Database already populated, skipping seed.")
+        print("Database already populated, skipping download.")
     else:
-        print("Database empty — seeding from source PDFs...")
-        download_pdfs()
-        # import and run your existing build logic
-        import build_db
-        print("Seed complete.")
+        download_and_extract_db()
