@@ -3,9 +3,8 @@ import time
 import json
 import shutil
 import uuid
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
-from fastapi import UploadFile, File
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -13,8 +12,49 @@ from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
 
+app = FastAPI(title="Synora API")
+executor = ThreadPoolExecutor(max_workers=4)
+REQUEST_TIMEOUT_SECONDS = 30
+
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+class ChatRequest(BaseModel):
+    question: str
+    audience: str = "individual"  # "employee" | "doctor" | "individual"
+    session_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    response: str
+    severity_signal: str | None = None
+    triage_recommendation: str | None = None
+    emergency_type: str | None = None
+
+
+def build_initial_state(question: str, audience: str, session_id: str | None = None) -> dict:
+    return {
+        "question": question,
+        "audience": audience,
+        "session_id": session_id,
+        "sensor_data": {},
+        "intent": "",
+        "emergency_type": None,
+        "context": "",
+        "sources": [],
+        "pages": [],
+        "analysis": None,
+        "recommendations": [],
+        "evidence_check_passed": True,
+        "evidence_failures": [],
+        "response": "",
+    }
+
+
+def run_graph(question: str, audience: str, session_id: str | None = None) -> dict:
+    return graph.invoke(build_initial_state(question, audience, session_id))
+
 
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...), session_id: str = None):
@@ -38,44 +78,6 @@ async def upload_document(file: UploadFile = File(...), session_id: str = None):
 
     return {"session_id": session_id, "filename": file.filename, "chunks_added": chunk_count}
 
-app = FastAPI(title="Synora API")
-executor = ThreadPoolExecutor(max_workers=4)
-REQUEST_TIMEOUT_SECONDS = 30
-
-
-class ChatRequest(BaseModel):
-    question: str
-    audience: str = "individual"  # "employee" | "doctor" | "individual"
-
-
-class ChatResponse(BaseModel):
-    response: str
-    severity_signal: str | None = None
-    triage_recommendation: str | None = None
-    emergency_type: str | None = None
-
-
-def build_initial_state(question: str, audience: str) -> dict:
-    return {
-        "question": question,
-        "audience": audience,
-        "sensor_data": {},
-        "intent": "",
-        "emergency_type": None,
-        "context": "",
-        "sources": [],
-        "pages": [],
-        "analysis": None,
-        "recommendations": [],
-        "evidence_check_passed": True,
-        "evidence_failures": [],
-        "response": "",
-    }
-
-
-def run_graph(question: str, audience: str) -> dict:
-    return graph.invoke(build_initial_state(question, audience))
-
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
@@ -89,7 +91,7 @@ def chat(req: ChatRequest):
 
     log_event("request_received", question=req.question, audience=req.audience)
 
-    future = executor.submit(run_graph, req.question, req.audience)
+    future = executor.submit(run_graph, req.question, req.audience, req.session_id)
     try:
         result = future.result(timeout=REQUEST_TIMEOUT_SECONDS)
     except FutureTimeoutError:
@@ -131,7 +133,7 @@ def chat_stream(req: ChatRequest):
 
     log_event("stream_request_received", question=req.question, audience=req.audience)
 
-    initial_state = build_initial_state(req.question, req.audience)
+    initial_state = build_initial_state(req.question, req.audience, req.session_id)
 
     def event_generator():
         start = time.time()
@@ -140,7 +142,6 @@ def chat_stream(req: ChatRequest):
                 node_name = list(step_output.keys())[0]
                 node_state = step_output[node_name]
 
-                # Build a lightweight, JSON-safe payload per step
                 payload = {
                     "step": node_name,
                     "response": node_state.get("response"),
