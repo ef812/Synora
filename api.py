@@ -3,6 +3,7 @@ import time
 import json
 import shutil
 import uuid
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,6 +14,15 @@ from logger_config import log_event
 from nodes.document_ingest import ingest_document
 
 app = FastAPI(title="Synora API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "https://*.vercel.app"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 executor = ThreadPoolExecutor(max_workers=4)
 REQUEST_TIMEOUT_SECONDS = 30
 
