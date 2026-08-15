@@ -17,6 +17,7 @@ class Analysis(TypedDict):
 class SynoraState(TypedDict):
     question: str
     audience: str  # "employee" | "doctor" | "individual"
+    session_id: Optional[str]
     sensor_data: Dict
     intent: str  # "factual" | "analysis_needed"
     emergency_type: Optional[str]  # "physical" | "crisis" | None
