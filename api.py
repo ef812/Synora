@@ -1,12 +1,42 @@
+import os
 import time
 import json
+import shutil
+import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi import UploadFile, File
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from graph import graph
 from logger_config import log_event
+from nodes.document_ingest import ingest_document
+
+UPLOAD_DIR = "uploaded_files"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...), session_id: str = None):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    filepath = os.path.join(UPLOAD_DIR, f"{session_id}_{file.filename}")
+    with open(filepath, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        chunk_count = ingest_document(filepath, session_id)
+    except Exception as e:
+        log_event("upload_error", filename=file.filename, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to process document.")
+
+    log_event("document_uploaded", filename=file.filename, session_id=session_id, chunks=chunk_count)
+
+    return {"session_id": session_id, "filename": file.filename, "chunks_added": chunk_count}
 
 app = FastAPI(title="Synora API")
 executor = ThreadPoolExecutor(max_workers=4)
