@@ -23,6 +23,8 @@ Respond ONLY with valid JSON, a list of recommendation objects, each with "text"
 [{{"text": "...", "source_ids": ["src_0"]}}]
 """
 
+MAX_RETRIES = 2
+
 
 def recommend(state: dict) -> dict:
     analysis = state["analysis"]
@@ -33,18 +35,19 @@ def recommend(state: dict) -> dict:
         evidence=analysis.get("supporting_evidence", []),
         context=state["context"],
     )
-    raw = chat(prompt)
-    print("---- RAW RECOMMEND OUTPUT ----")
-    print(raw)
-    print("-------------------------------")
 
-    if raw.startswith("```"):
-        raw = raw.strip("`").replace("json", "", 1).strip()
+    for attempt in range(MAX_RETRIES + 1):
+        raw = chat(prompt)
 
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        parsed = []
+        if raw.startswith("```"):
+            raw = raw.strip("`").replace("json", "", 1).strip()
 
-    state["recommendations"] = parsed
+        try:
+            parsed = json.loads(raw)
+            state["recommendations"] = parsed
+            return state
+        except json.JSONDecodeError:
+            continue
+
+    state["recommendations"] = []
     return state
