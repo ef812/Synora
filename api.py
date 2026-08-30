@@ -3,21 +3,31 @@ import time
 import json
 import shutil
 import uuid
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from fastapi import Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
+from config import APP_API_KEY
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
 
 app = FastAPI(title="Synora API")
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://synora-frontend-swart.vercel.app"], 
+    allow_origins=["http://localhost:5173", "https://synora-frontend-swart.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,6 +38,20 @@ REQUEST_TIMEOUT_SECONDS = 30
 
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please wait a moment and try again."},
+    )
+
+
+def verify_api_key(request: Request):
+    key = request.headers.get("X-API-Key")
+    if not APP_API_KEY or key != APP_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
 class ChatRequest(BaseModel):
@@ -66,8 +90,9 @@ def run_graph(question: str, audience: str, session_id: str | None = None) -> di
     return graph.invoke(build_initial_state(question, audience, session_id))
 
 
-@app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...), session_id: str = None):
+@app.post("/api/upload", dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def upload_document(request: Request, file: UploadFile = File(...), session_id: str = None):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -89,8 +114,9 @@ async def upload_document(file: UploadFile = File(...), session_id: str = None):
     return {"session_id": session_id, "filename": file.filename, "chunks_added": chunk_count}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def chat(request: Request, req: ChatRequest):
     start = time.time()
 
     if not req.question.strip():
@@ -133,8 +159,9 @@ def chat(req: ChatRequest):
     )
 
 
-@app.post("/api/chat/stream")
-def chat_stream(req: ChatRequest):
+@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def chat_stream(request: Request, req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
