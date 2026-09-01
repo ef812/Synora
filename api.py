@@ -13,8 +13,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-
-from config import APP_API_KEY
+from clerk_backend_api import Clerk
+from clerk_backend_api.security import authenticate_request, AuthenticateRequestOptions
+from config import APP_API_KEY, CLERK_SECRET_KEY
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
@@ -39,6 +40,8 @@ REQUEST_TIMEOUT_SECONDS = 30
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+clerk_client = Clerk(bearer_auth=CLERK_SECRET_KEY)
+
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -52,6 +55,28 @@ def verify_api_key(request: Request):
     key = request.headers.get("X-API-Key")
     if not APP_API_KEY or key != APP_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
+def verify_clerk_user(request: Request):
+    try:
+        request_state = authenticate_request(
+            request,
+            AuthenticateRequestOptions(
+                secret_key=CLERK_SECRET_KEY,
+                authorized_parties=[
+                    "http://localhost:5173",
+                    "https://synora-frontend-swart.vercel.app",
+                ],
+                clock_skew_in_ms=15000,  # 15 seconds, temporarily generous for local testing
+            ),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid or missing session token.")
+
+    if not request_state.is_signed_in:
+        raise HTTPException(status_code=401, detail="You must be signed in to use this.")
+
+    return request_state.payload  # contains user info (e.g. user_id) if needed downstream
 
 
 class ChatRequest(BaseModel):
@@ -90,7 +115,7 @@ def run_graph(question: str, audience: str, session_id: str | None = None) -> di
     return graph.invoke(build_initial_state(question, audience, session_id))
 
 
-@app.post("/api/upload", dependencies=[Depends(verify_api_key)])
+@app.post("/api/upload", dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
 @limiter.limit("5/minute")
 async def upload_document(request: Request, file: UploadFile = File(...), session_id: str = None):
     if not file.filename.endswith(".pdf"):
@@ -114,7 +139,7 @@ async def upload_document(request: Request, file: UploadFile = File(...), sessio
     return {"session_id": session_id, "filename": file.filename, "chunks_added": chunk_count}
 
 
-@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
 @limiter.limit("10/minute")
 def chat(request: Request, req: ChatRequest):
     start = time.time()
@@ -159,7 +184,7 @@ def chat(request: Request, req: ChatRequest):
     )
 
 
-@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key)])
+@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
 @limiter.limit("10/minute")
 def chat_stream(request: Request, req: ChatRequest):
     if not req.question.strip():
