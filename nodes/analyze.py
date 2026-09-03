@@ -37,7 +37,7 @@ def analyze(state: dict) -> dict:
     prompt = ANALYZE_PROMPT.format(question=state["question"], context=state["context"])
 
     for attempt in range(MAX_RETRIES + 1):
-        raw = chat(prompt)
+        raw = chat(prompt, temperature=0.1)
 
         if raw.startswith("```"):
             raw = raw.strip("`").replace("json", "", 1).strip()
