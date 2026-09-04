@@ -14,6 +14,13 @@ class Analysis(TypedDict):
     triage_recommendation: str  # "self_care" | "see_doctor_soon" | "seek_urgent_care"
 
 
+class EmployeeContext(TypedDict):
+    job_role: Optional[str]
+    work_schedule: Optional[str]
+    stress_factors: Dict
+    recent_checkins: List[Dict]
+
+
 class SynoraState(TypedDict):
     question: str
     audience: str  # "employee" | "doctor" | "individual"
@@ -29,3 +36,4 @@ class SynoraState(TypedDict):
     evidence_check_passed: bool
     evidence_failures: List[str]
     response: str
+    employee_context: Optional[EmployeeContext]
