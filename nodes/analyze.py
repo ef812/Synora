@@ -13,6 +13,7 @@ Given the user's question and retrieved medical context, identify:
 4. severity_signal: one of "low", "moderate", "high", "unknown"
 5. triage_recommendation: one of "self_care", "see_doctor_soon", "seek_urgent_care" — based
    on how urgently this pattern typically warrants professional evaluation
+{workplace_section}
   
    
 Respond ONLY with valid JSON in this exact shape, nothing else:
@@ -30,11 +31,52 @@ Context:
 {context}
 """
 
-MAX_RETRIES = 2 
+WORKPLACE_SECTION_TEMPLATE = """
+Workplace context for this user (use to inform framing only — e.g. favor
+ergonomic, burnout, shift-work-sleep, or workload-related framing where
+relevant; this is background, not something to diagnose from or quote back
+verbatim):
+- Job role: {job_role}
+- Work schedule: {work_schedule}
+- Self-reported stress factors (1-5 scale): workload={workload}, hours={hours}, physical_strain={physical_strain}
+{checkin_trend}"""
+
+MAX_RETRIES = 2
+
+
+def _format_workplace_section(employee_context: dict | None) -> str:
+    if not employee_context:
+        return ""
+
+    stress = employee_context.get("stress_factors") or {}
+    checkins = employee_context.get("recent_checkins") or []
+
+    checkin_trend = ""
+    if checkins:
+        lines = [
+            f"  - {c['date']}: energy={c.get('energy')}, stress={c.get('stress')}, "
+            f"sleep={c.get('sleep')}" + (f", noted: {c['new_symptoms']}" if c.get("new_symptoms") else "")
+            for c in checkins
+        ]
+        checkin_trend = "Recent check-in history (most recent first):\n" + "\n".join(lines)
+
+    return WORKPLACE_SECTION_TEMPLATE.format(
+        job_role=employee_context.get("job_role") or "not specified",
+        work_schedule=employee_context.get("work_schedule") or "not specified",
+        workload=stress.get("workload", "n/a"),
+        hours=stress.get("hours", "n/a"),
+        physical_strain=stress.get("physical_strain", "n/a"),
+        checkin_trend=checkin_trend,
+    )
 
 
 def analyze(state: dict) -> dict:
-    prompt = ANALYZE_PROMPT.format(question=state["question"], context=state["context"])
+    workplace_section = _format_workplace_section(state.get("employee_context"))
+    prompt = ANALYZE_PROMPT.format(
+        question=state["question"],
+        context=state["context"],
+        workplace_section=workplace_section,
+    )
 
     for attempt in range(MAX_RETRIES + 1):
         raw = chat(prompt, temperature=0.1)
