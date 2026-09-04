@@ -33,8 +33,21 @@ def normalize_query(question: str) -> str:
 
 
 def retrieve(state: dict) -> dict:
-    query = normalize_query(state["question"])
-    docs = vectorstore.similarity_search(query, k=6)
+    question = state["question"]
+    normalized = normalize_query(question)
+
+    # Retrieve on the original phrasing (preserves whatever already worked),
+    # then add results from the normalized query as extra candidates —
+    # additive, so normalization can only help coverage, never remove a
+    # chunk the original phrasing would have found on its own.
+    docs = vectorstore.similarity_search(question, k=4)
+    if normalized != question:
+        extra_docs = vectorstore.similarity_search(normalized, k=4)
+        seen = {d.page_content for d in docs}
+        for d in extra_docs:
+            if d.page_content not in seen:
+                docs.append(d)
+                seen.add(d.page_content)
 
     session_id = state.get("session_id")
     if session_id:
@@ -44,7 +57,7 @@ def retrieve(state: dict) -> dict:
                 embedding_function=embedding_model,
                 collection_name=f"session_{session_id}",
             )
-            session_docs = session_db.similarity_search(query, k=2)
+            session_docs = session_db.similarity_search(question, k=2)
             docs = session_docs + docs
         except Exception:
             pass
