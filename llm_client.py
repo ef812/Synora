@@ -5,7 +5,7 @@ from config import GROQ_API_KEY, MODEL_NAME
 client = Groq(api_key=GROQ_API_KEY)
 
 
-def chat(prompt: str, max_tokens: int = 1536, think: bool = False, temperature: float = 0.7) -> str:
+def chat(prompt: str, max_tokens: int = 700, think: bool = False, temperature: float = 0.7) -> str:
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
