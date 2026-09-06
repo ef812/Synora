@@ -30,12 +30,22 @@ class EmployeeProfile(Base):
     context_last_updated = Column(DateTime(timezone=True), default=_now)
     created_at = Column(DateTime(timezone=True), default=_now)
 
+    # Stripe subscription state -- kept here since it's 1:1 with the employee
+    # user, no need for a separate table.
+    stripe_customer_id = Column(String, nullable=True)
+    stripe_subscription_id = Column(String, nullable=True)
+    subscription_status = Column(String, default="inactive")  # "inactive" | "active" | "past_due" | "canceled"
+    subscription_plan = Column(String, nullable=True)  # "monthly" | "annual"
+
     checkins = relationship("CheckinEntry", back_populates="profile", order_by="desc(CheckinEntry.created_at)")
 
     def context_is_stale(self, staleness_days: int = 90) -> bool:
         """True once workplace context is old enough to re-ask (default ~3 months)."""
         age = _now() - self.context_last_updated.replace(tzinfo=timezone.utc)
         return age.days >= staleness_days
+
+    def has_active_subscription(self) -> bool:
+        return self.subscription_status == "active"
 
 
 class CheckinEntry(Base):
