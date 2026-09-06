@@ -10,6 +10,10 @@ IMPORTANT RULES:
 - Only give general, non-diagnostic guidance: self-care steps, what to monitor, and when to
   seek professional evaluation.
 - Do not add outside knowledge beyond what's given below.
+- For source_ids, you MUST only use IDs from this exact list, copied verbatim: {valid_sources}.
+  Never invent an ID that isn't in that list, and never cite an ID whose content doesn't
+  actually support the recommendation you're attaching it to. If no ID genuinely supports a
+  recommendation, give it an empty source_ids list rather than guessing.
 
 Flagged patterns: {patterns}
 Possible related topics (a range, not a conclusion): {topics}
@@ -34,6 +38,7 @@ def recommend(state: dict) -> dict:
         triage=analysis.get("triage_recommendation", "see_doctor_soon"),
         evidence=analysis.get("supporting_evidence", []),
         context=state["context"],
+        valid_sources=", ".join(state["sources"]) if state["sources"] else "(none retrieved)",
     )
 
     for attempt in range(MAX_RETRIES + 1):
