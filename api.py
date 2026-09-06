@@ -25,17 +25,15 @@ from config import (
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
-from db import get_db, init_db
+from db import get_db
 from models import EmployeeProfile, CheckinEntry
 
 stripe.api_key = STRIPE_SECRET_KEY
 
 app = FastAPI(title="Synora API")
 
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
+# Schema is now managed by Alembic migrations (see alembic/), not create_all().
+# Run `alembic upgrade head` as part of your deploy process instead.
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
