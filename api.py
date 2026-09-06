@@ -17,12 +17,18 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from clerk_backend_api import Clerk
 from clerk_backend_api.security import authenticate_request, AuthenticateRequestOptions
 from sqlalchemy.orm import Session
-from config import APP_API_KEY, CLERK_SECRET_KEY
+import stripe
+from config import (
+    APP_API_KEY, CLERK_SECRET_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+    STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL, FRONTEND_URL,
+)
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
 from db import get_db, init_db
 from models import EmployeeProfile, CheckinEntry
+
+stripe.api_key = STRIPE_SECRET_KEY
 
 app = FastAPI(title="Synora API")
 
@@ -145,6 +151,19 @@ class CheckinResponse(BaseModel):
     stress: int | None
     sleep: int | None
     new_symptoms: str | None
+
+
+class CheckoutRequest(BaseModel):
+    plan: str  # "monthly" | "annual"
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+
+
+class SubscriptionStatusResponse(BaseModel):
+    status: str  # "inactive" | "active" | "past_due" | "canceled"
+    plan: str | None
 
 
 def build_initial_state(question: str, audience: str, session_id: str | None = None,
@@ -452,6 +471,121 @@ def checkin_history(
         )
         for e in entries
     ]
+
+
+@app.post("/api/billing/create-checkout-session", response_model=CheckoutResponse,
+          dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def create_checkout_session(
+    request: Request,
+    req: CheckoutRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    if req.plan not in ("monthly", "annual"):
+        raise HTTPException(status_code=400, detail="Invalid plan. Must be 'monthly' or 'annual'.")
+
+    price_id = STRIPE_PRICE_MONTHLY if req.plan == "monthly" else STRIPE_PRICE_ANNUAL
+    if not price_id:
+        raise HTTPException(status_code=500, detail="Billing is not configured correctly.")
+
+    # A profile might not exist yet if the user is subscribing before ever
+    # filling in workplace context -- create a bare row so we have somewhere
+    # to attach the Stripe customer/subscription IDs once the webhook fires.
+    profile = db.get(EmployeeProfile, user_id)
+    if profile is None:
+        profile = EmployeeProfile(user_id=user_id)
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            customer=profile.stripe_customer_id,  # None on first checkout; Stripe creates one
+            client_reference_id=user_id,
+            success_url=f"{FRONTEND_URL}/?checkout=success",
+            cancel_url=f"{FRONTEND_URL}/?checkout=canceled",
+            metadata={"user_id": user_id, "plan": req.plan},
+        )
+    except stripe.error.StripeError as e:
+        log_event("checkout_session_error", user_id=user_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Could not start checkout. Please try again.")
+
+    log_event("checkout_session_created", user_id=user_id, plan=req.plan)
+
+    return CheckoutResponse(checkout_url=session.url)
+
+
+@app.get("/api/billing/subscription-status", response_model=SubscriptionStatusResponse,
+         dependencies=[Depends(verify_api_key)])
+def subscription_status(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    profile = db.get(EmployeeProfile, user_id)
+    if profile is None:
+        return SubscriptionStatusResponse(status="inactive", plan=None)
+
+    return SubscriptionStatusResponse(status=profile.subscription_status, plan=profile.subscription_plan)
+
+
+@app.post("/api/billing/webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except (ValueError, stripe.error.SignatureVerificationError) as e:
+        log_event("stripe_webhook_invalid", error=str(e))
+        raise HTTPException(status_code=400, detail="Invalid webhook signature.")
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    # checkout.session.completed fires once, right after successful payment --
+    # this is where we learn the Stripe customer/subscription IDs for the first time.
+    if event_type == "checkout.session.completed":
+        user_id = data.get("client_reference_id") or data.get("metadata", {}).get("user_id")
+        plan = data.get("metadata", {}).get("plan")
+        profile = db.get(EmployeeProfile, user_id) if user_id else None
+        if profile:
+            profile.stripe_customer_id = data.get("customer")
+            profile.stripe_subscription_id = data.get("subscription")
+            profile.subscription_status = "active"
+            profile.subscription_plan = plan
+            db.commit()
+            log_event("subscription_activated", user_id=user_id, plan=plan)
+
+    # customer.subscription.updated/deleted cover renewals, plan changes,
+    # payment failures, and cancellations over the subscription's lifetime.
+    elif event_type in ("customer.subscription.updated", "customer.subscription.deleted"):
+        subscription_id = data.get("id")
+        profile = (
+            db.query(EmployeeProfile)
+            .filter(EmployeeProfile.stripe_subscription_id == subscription_id)
+            .first()
+        )
+        if profile:
+            stripe_status = data.get("status")  # "active" | "past_due" | "canceled" | etc.
+            profile.subscription_status = stripe_status if event_type.endswith("updated") else "canceled"
+            db.commit()
+            log_event("subscription_status_changed", user_id=profile.user_id, status=profile.subscription_status)
+
+    return {"received": True}
+
+
+def require_active_subscription(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)) -> str:
+    """Dependency for gating employee-tier-only resources (e.g. the future
+    package download endpoint) behind an active Stripe subscription."""
+    profile = db.get(EmployeeProfile, user_id)
+    if profile is None or not profile.has_active_subscription():
+        raise HTTPException(status_code=402, detail="An active employee-tier subscription is required.")
+    return user_id
 
 
 @app.get("/api/health")
