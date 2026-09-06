@@ -16,3 +16,4 @@ slowapi
 clerk-backend-api
 sqlalchemy
 psycopg2-binary
+stripe
