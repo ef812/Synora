@@ -264,6 +264,7 @@ def chat(request: Request, req: ChatRequest, db: Session = Depends(get_db),
         intent=result.get("intent"),
         emergency_type=result.get("emergency_type"),
         evidence_check_passed=result.get("evidence_check_passed"),
+        evidence_failures=result.get("evidence_failures"),
         duration_seconds=round(duration, 2),
     )
 
