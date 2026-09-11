@@ -18,3 +18,4 @@ sqlalchemy
 psycopg2-binary
 stripe
 alembic
+b2sdk
