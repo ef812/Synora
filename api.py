@@ -20,13 +20,14 @@ from sqlalchemy.orm import Session
 import stripe
 from config import (
     APP_API_KEY, CLERK_SECRET_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
-    STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL, FRONTEND_URL,
+    STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL, FRONTEND_URL, DOWNLOAD_URL_VALID_SECONDS,
 )
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
 from db import get_db
 from models import EmployeeProfile, CheckinEntry
+from b2_client import get_installer_download_url
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -162,6 +163,11 @@ class CheckoutResponse(BaseModel):
 class SubscriptionStatusResponse(BaseModel):
     status: str  # "inactive" | "active" | "past_due" | "canceled"
     plan: str | None
+
+
+class DownloadLinkResponse(BaseModel):
+    download_url: str
+    expires_in_seconds: int
 
 
 def build_initial_state(question: str, audience: str, session_id: str | None = None,
@@ -584,6 +590,30 @@ def require_active_subscription(user_id: str = Depends(get_current_user_id), db:
     if profile is None or not profile.has_active_subscription():
         raise HTTPException(status_code=402, detail="An active employee-tier subscription is required.")
     return user_id
+
+
+@app.get("/api/employee/download", response_model=DownloadLinkResponse,
+         dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+def get_download_link(
+    request: Request,
+    platform: str,
+    user_id: str = Depends(require_active_subscription),
+):
+    if platform not in ("win", "mac"):
+        raise HTTPException(status_code=400, detail="platform must be 'win' or 'mac'.")
+
+    try:
+        url = get_installer_download_url(platform)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unsupported platform.")
+    except Exception as e:
+        log_event("download_link_error", user_id=user_id, platform=platform, error=str(e))
+        raise HTTPException(status_code=500, detail="Could not generate download link. Please try again.")
+
+    log_event("download_link_issued", user_id=user_id, platform=platform)
+
+    return DownloadLinkResponse(download_url=url, expires_in_seconds=DOWNLOAD_URL_VALID_SECONDS)
 
 
 @app.get("/api/health")
