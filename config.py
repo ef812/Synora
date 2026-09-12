@@ -16,5 +16,5 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "https://synora-frontend-swart.vercel.a
 
 B2_KEY_ID = os.getenv("B2_KEY_ID")
 B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")
-B2_INSTALLERS_BUCKET_NAME = os.getenv("B2_INSTALLERS_BUCKET_NAME", "synora-installers")
+B2_INSTALLERS_BUCKET_NAME = os.getenv("B2_INSTALLERS_BUCKET_NAME", "Synora-installers")
 DOWNLOAD_URL_VALID_SECONDS = 300  # authorized download links expire after 5 minutes
