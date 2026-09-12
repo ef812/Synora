@@ -154,6 +154,7 @@ class CheckinResponse(BaseModel):
 
 class CheckoutRequest(BaseModel):
     plan: str  # "monthly" | "annual"
+    client: str = "web"  # "web" | "desktop" -- desktop gets a custom-protocol redirect instead of an https:// one
 
 
 class CheckoutResponse(BaseModel):
@@ -503,6 +504,20 @@ def create_checkout_session(
         db.commit()
         db.refresh(profile)
 
+    if req.client not in ("web", "desktop"):
+        raise HTTPException(status_code=400, detail="Invalid client. Must be 'web' or 'desktop'.")
+
+    # Desktop checkout happens in the OS browser (see electron/main.js), so we
+    # can't send it back to an https:// URL loaded inside the packaged app's
+    # own window -- that would just replace the app with the web tier. Instead
+    # redirect to a custom protocol the Electron app registers and intercepts.
+    if req.client == "desktop":
+        success_url = "synora://checkout?status=success"
+        cancel_url = "synora://checkout?status=canceled"
+    else:
+        success_url = f"{FRONTEND_URL}/?checkout=success"
+        cancel_url = f"{FRONTEND_URL}/?checkout=canceled"
+
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",
@@ -510,8 +525,8 @@ def create_checkout_session(
             line_items=[{"price": price_id, "quantity": 1}],
             customer=profile.stripe_customer_id,  # None on first checkout; Stripe creates one
             client_reference_id=user_id,
-            success_url=f"{FRONTEND_URL}/?checkout=success",
-            cancel_url=f"{FRONTEND_URL}/?checkout=canceled",
+            success_url=success_url,
+            cancel_url=cancel_url,
             metadata={"user_id": user_id, "plan": req.plan},
         )
     except stripe.error.StripeError as e:
@@ -549,7 +564,11 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
     event_type = event["type"]
-    data = event["data"]["object"]
+    # event["data"]["object"] is a Stripe SDK StripeObject, not a plain dict --
+    # it supports item access (data["x"]) but NOT dict methods like .get(),
+    # which raises AttributeError. Convert once here so the .get() calls below
+    # (including nested "metadata") work on real dicts.
+    data = event["data"]["object"].to_dict()
 
     # checkout.session.completed fires once, right after successful payment --
     # this is where we learn the Stripe customer/subscription IDs for the first time.
