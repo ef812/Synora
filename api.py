@@ -101,6 +101,32 @@ def get_current_user_id(payload: dict = Depends(verify_clerk_user)) -> str:
     return user_id
 
 
+class DesktopHandoffResponse(BaseModel):
+    ticket: str
+
+
+@app.post("/api/auth/desktop-handoff", response_model=DesktopHandoffResponse,
+          dependencies=[Depends(verify_api_key)])
+def desktop_handoff(user_id: str = Depends(get_current_user_id)):
+    """Called from the web frontend (real https origin, where Clerk's normal
+    sign-in flow works) once the user is signed in there. Mints a short-lived,
+    single-use Clerk sign-in token that the desktop app's renderer can redeem
+    via signIn.create({ strategy: 'ticket', ticket }) after being handed it
+    through the synora://auth deep link -- this sidesteps trying to run
+    Clerk's own cookie-based session handshake inside the app:// origin,
+    which is what was causing the sign-in bounce-back loop there.
+    """
+    try:
+        token_response = clerk_client.sign_in_tokens.create(request={
+            "user_id": user_id,
+            "expires_in_seconds": 60,  # only needs to survive one immediate redirect
+        })
+    except Exception as e:
+        log_event("desktop_handoff_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to create desktop sign-in ticket.")
+    return DesktopHandoffResponse(ticket=token_response.token)
+
+
 class ChatRequest(BaseModel):
     question: str
     audience: str = "individual"  # "employee" | "doctor" | "individual"
