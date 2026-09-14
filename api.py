@@ -42,7 +42,12 @@ app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://synora-frontend-swart.vercel.app"],
+    # "app://bundle" is the packaged Electron desktop app's origin (see
+    # main.js's app:// protocol handler) -- without it, every fetch call the
+    # desktop app makes to this backend fails CORS preflight, which is why
+    # subscription status, employee profile, checkout, and chat all broke
+    # at once after switching off raw file:// loading.
+    allow_origins=["http://localhost:5173", "https://synora-frontend-swart.vercel.app", "app://bundle"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +85,7 @@ def verify_clerk_user(request: Request):
                 authorized_parties=[
                     "http://localhost:5173",
                     "https://synora-frontend-swart.vercel.app",
+                    "app://bundle",  # packaged Electron desktop app's origin
                 ],
                 clock_skew_in_ms=15000,  # 15 seconds, temporarily generous for local testing
             ),
