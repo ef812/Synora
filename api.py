@@ -14,14 +14,15 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from clerk_backend_api import Clerk
 from clerk_backend_api.security import authenticate_request, AuthenticateRequestOptions
 from sqlalchemy.orm import Session
 import stripe
 from config import (
     APP_API_KEY, CLERK_SECRET_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
     STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL, FRONTEND_URL, DOWNLOAD_URL_VALID_SECONDS,
+    DESKTOP_TOKEN_SECRET,
 )
+from desktop_auth import create_desktop_token, verify_desktop_token
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
@@ -58,8 +59,6 @@ REQUEST_TIMEOUT_SECONDS = 30
 
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-clerk_client = Clerk(bearer_auth=CLERK_SECRET_KEY)
 
 
 @app.exception_handler(RateLimitExceeded)
@@ -107,30 +106,64 @@ def get_current_user_id(payload: dict = Depends(verify_clerk_user)) -> str:
     return user_id
 
 
+def get_current_user_id_flexible(request: Request) -> str:
+    """Accepts either our own signed desktop token (desktop app calls,
+    minted via /api/auth/desktop-handoff after a one-time Clerk sign-in in
+    the system browser) or a real Clerk session (web tier calls). The
+    desktop app never relies on Clerk's own getToken()/session refresh for
+    authenticated API calls -- that's what kept 401ing under Electron's
+    app:// origin. See desktop_auth.py for why.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        desktop_user_id = verify_desktop_token(token, DESKTOP_TOKEN_SECRET)
+        if desktop_user_id:
+            return desktop_user_id
+        # Not a valid/current desktop token -- fall through and try it as a
+        # Clerk session token instead, rather than failing immediately.
+
+    try:
+        request_state = authenticate_request(
+            request,
+            AuthenticateRequestOptions(
+                secret_key=CLERK_SECRET_KEY,
+                authorized_parties=[
+                    "http://localhost:5173",
+                    "https://synora-frontend-swart.vercel.app",
+                ],
+                clock_skew_in_ms=15000,
+            ),
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or missing session token.")
+
+    if not request_state.is_signed_in:
+        raise HTTPException(status_code=401, detail="You must be signed in to use this.")
+
+    user_id = request_state.payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Could not determine user identity.")
+    return user_id
+
+
 class DesktopHandoffResponse(BaseModel):
-    ticket: str
+    token: str
 
 
 @app.post("/api/auth/desktop-handoff", response_model=DesktopHandoffResponse,
           dependencies=[Depends(verify_api_key)])
 def desktop_handoff(user_id: str = Depends(get_current_user_id)):
     """Called from the web frontend (real https origin, where Clerk's normal
-    sign-in flow works) once the user is signed in there. Mints a short-lived,
-    single-use Clerk sign-in token that the desktop app's renderer can redeem
-    via signIn.create({ strategy: 'ticket', ticket }) after being handed it
-    through the synora://auth deep link -- this sidesteps trying to run
-    Clerk's own cookie-based session handshake inside the app:// origin,
-    which is what was causing the sign-in bounce-back loop there.
+    sign-in flow works) once the user is signed in there. Mints our own
+    signed desktop token (see desktop_auth.py) that the desktop app stores
+    and uses as a plain Bearer token for every subsequent API call, handed
+    over via the synora://auth deep link. Requiring Depends(get_current_user_id)
+    here (Clerk-only, not the flexible version) means only someone who just
+    did a real Clerk sign-in on the web tier can mint one.
     """
-    try:
-        token_response = clerk_client.sign_in_tokens.create(request={
-            "user_id": user_id,
-            "expires_in_seconds": 60,  # only needs to survive one immediate redirect
-        })
-    except Exception as e:
-        log_event("desktop_handoff_error", error=str(e))
-        raise HTTPException(status_code=500, detail="Failed to create desktop sign-in ticket.")
-    return DesktopHandoffResponse(ticket=token_response.token)
+    token = create_desktop_token(user_id, DESKTOP_TOKEN_SECRET)
+    return DesktopHandoffResponse(token=token)
 
 
 class ChatRequest(BaseModel):
@@ -259,7 +292,7 @@ def run_graph(question: str, audience: str, session_id: str | None = None,
     return graph.invoke(build_initial_state(question, audience, session_id, employee_context))
 
 
-@app.post("/api/upload", dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
+@app.post("/api/upload", dependencies=[Depends(verify_api_key), Depends(get_current_user_id_flexible)])
 @limiter.limit("5/minute")
 async def upload_document(request: Request, file: UploadFile = File(...), session_id: str = None):
     if not file.filename.endswith(".pdf"):
@@ -283,10 +316,10 @@ async def upload_document(request: Request, file: UploadFile = File(...), sessio
     return {"session_id": session_id, "filename": file.filename, "chunks_added": chunk_count}
 
 
-@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("10/minute")
 def chat(request: Request, req: ChatRequest, db: Session = Depends(get_db),
-         payload: dict = Depends(verify_clerk_user)):
+         user_id: str = Depends(get_current_user_id_flexible)):
     start = time.time()
 
     if not req.question.strip():
@@ -297,7 +330,7 @@ def chat(request: Request, req: ChatRequest, db: Session = Depends(get_db),
 
     employee_context = None
     if req.audience == "employee":
-        employee_context = load_employee_context(payload.get("sub"), db)
+        employee_context = load_employee_context(user_id, db)
 
     log_event("request_received", question=req.question, audience=req.audience)
 
@@ -334,10 +367,10 @@ def chat(request: Request, req: ChatRequest, db: Session = Depends(get_db),
     )
 
 
-@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key), Depends(verify_clerk_user)])
+@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key)])
 @limiter.limit("10/minute")
 def chat_stream(request: Request, req: ChatRequest, db: Session = Depends(get_db),
-                 payload: dict = Depends(verify_clerk_user)):
+                 user_id: str = Depends(get_current_user_id_flexible)):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
@@ -346,7 +379,7 @@ def chat_stream(request: Request, req: ChatRequest, db: Session = Depends(get_db
 
     employee_context = None
     if req.audience == "employee":
-        employee_context = load_employee_context(payload.get("sub"), db)
+        employee_context = load_employee_context(user_id, db)
 
     log_event("stream_request_received", question=req.question, audience=req.audience)
 
@@ -388,7 +421,7 @@ def chat_stream(request: Request, req: ChatRequest, db: Session = Depends(get_db
 def upsert_employee_profile(
     request: Request,
     req: EmployeeProfileRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     profile = db.get(EmployeeProfile, user_id)
@@ -429,7 +462,7 @@ def upsert_employee_profile(
          dependencies=[Depends(verify_api_key)])
 def get_employee_profile(
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     profile = db.get(EmployeeProfile, user_id)
@@ -452,7 +485,7 @@ def get_employee_profile(
 def submit_checkin(
     request: Request,
     req: CheckinRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     profile = db.get(EmployeeProfile, user_id)
@@ -487,7 +520,7 @@ def submit_checkin(
 def checkin_history(
     request: Request,
     limit: int = 10,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     entries = (
@@ -516,7 +549,7 @@ def checkin_history(
 def create_checkout_session(
     request: Request,
     req: CheckoutRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     if req.plan not in ("monthly", "annual"):
@@ -574,7 +607,7 @@ def create_checkout_session(
          dependencies=[Depends(verify_api_key)])
 def subscription_status(
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id_flexible),
     db: Session = Depends(get_db),
 ):
     profile = db.get(EmployeeProfile, user_id)
@@ -634,7 +667,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     return {"received": True}
 
 
-def require_active_subscription(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)) -> str:
+def require_active_subscription(user_id: str = Depends(get_current_user_id_flexible), db: Session = Depends(get_db)) -> str:
     """Dependency for gating employee-tier-only resources (e.g. the future
     package download endpoint) behind an active Stripe subscription."""
     profile = db.get(EmployeeProfile, user_id)
