@@ -22,7 +22,7 @@ from config import (
     STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL, FRONTEND_URL, DOWNLOAD_URL_VALID_SECONDS,
     DESKTOP_TOKEN_SECRET,
 )
-from desktop_auth import create_desktop_token, verify_desktop_token
+from desktop_auth import create_desktop_token, verify_desktop_token, secret_fingerprint, debug_decode_desktop_token
 from graph import graph
 from logger_config import log_event
 from nodes.document_ingest import ingest_document
@@ -120,6 +120,10 @@ def get_current_user_id_flexible(request: Request) -> str:
         desktop_user_id = verify_desktop_token(token, DESKTOP_TOKEN_SECRET)
         if desktop_user_id:
             return desktop_user_id
+        # TEMPORARY -- log exactly why this token failed, without exposing
+        # the secret itself, to find whether it's a secret mismatch or
+        # something else (e.g. token corrupted in transit).
+        log_event("desktop_token_rejected", **debug_decode_desktop_token(token, DESKTOP_TOKEN_SECRET))
         # Not a valid/current desktop token -- fall through and try it as a
         # Clerk session token instead, rather than failing immediately.
 
@@ -163,6 +167,7 @@ def desktop_handoff(user_id: str = Depends(get_current_user_id)):
     did a real Clerk sign-in on the web tier can mint one.
     """
     token = create_desktop_token(user_id, DESKTOP_TOKEN_SECRET)
+    log_event("desktop_token_minted", user_id=user_id, secret_fingerprint=secret_fingerprint(DESKTOP_TOKEN_SECRET))
     return DesktopHandoffResponse(token=token)
 
 
