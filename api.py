@@ -155,6 +155,20 @@ class DesktopHandoffResponse(BaseModel):
     token: str
 
 
+@app.get("/api/debug/desktop-auth-status")
+def debug_desktop_auth_status():
+    """TEMPORARY, no-auth diagnostic endpoint -- lets us confirm definitively
+    (by just hitting the URL directly, sidestepping any confusion about
+    Railway log timing/caching) which build is live and what secret
+    fingerprint it's using, without ever exposing the secret itself.
+    Remove this once the 401 issue is resolved -- an unauthenticated debug
+    endpoint has no place in a shipped build."""
+    return {
+        "build_marker": "desktop-auth-debug-v1",
+        "desktop_token_secret_fingerprint": secret_fingerprint(DESKTOP_TOKEN_SECRET),
+    }
+
+
 @app.post("/api/auth/desktop-handoff", response_model=DesktopHandoffResponse,
           dependencies=[Depends(verify_api_key)])
 def desktop_handoff(user_id: str = Depends(get_current_user_id)):
