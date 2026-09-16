@@ -60,3 +60,36 @@ def verify_desktop_token(token: str, secret: str) -> str | None:
     if expires_at < int(time.time()):
         return None
     return user_id
+
+
+def secret_fingerprint(secret: str | None) -> str:
+    """A short, non-reversible fingerprint of the secret currently in use --
+    safe to log. If the mint-time and verify-time fingerprints differ, the
+    secret itself is inconsistent between requests (e.g. Railway env var
+    changed/rolled back between deploys); if they match, the bug is
+    elsewhere (e.g. the Authorization header not reaching the backend).
+    TEMPORARY -- remove once the 401 issue is resolved."""
+    if not secret:
+        return "MISSING"
+    return hashlib.sha256(secret.encode()).hexdigest()[:8]
+
+
+def debug_decode_desktop_token(token: str, secret: str) -> dict:
+    """Diagnostic-only decode that reports *why* verification failed,
+    without ever exposing the secret itself. TEMPORARY -- remove once the
+    401 issue is resolved."""
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        user_id, expires_at_str, signature = raw.rsplit(":", 2)
+        expires_at = int(expires_at_str)
+    except Exception as e:
+        return {"decode_error": str(e)}
+
+    expected_signature = _sign(f"{user_id}:{expires_at}", secret)
+    return {
+        "user_id": user_id,
+        "expires_at": expires_at,
+        "expired": expires_at < int(time.time()),
+        "signature_matches": hmac.compare_digest(signature, expected_signature),
+        "secret_fingerprint": secret_fingerprint(secret),
+    }
