@@ -1,9 +1,12 @@
 import os
 import zipfile
-import requests
+from b2sdk.v2 import InMemoryAccountInfo, B2Api
 
 DB_PATH = os.getenv("CHROMA_DB_PATH", "db")
-DB_ZIP_URL = os.getenv("DB_ZIP_URL")  # set this in Railway variables
+B2_KEY_ID = os.getenv("B2_KEY_ID")
+B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")
+B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME", "Synora")
+DB_ZIP_FILENAME = os.getenv("DB_ZIP_FILENAME", "db.zip")
 
 
 def db_is_populated() -> bool:
@@ -13,13 +16,15 @@ def db_is_populated() -> bool:
 
 def download_and_extract_db():
     print("Downloading pre-built database...")
-    response = requests.get(DB_ZIP_URL, stream=True)
-    response.raise_for_status()
+
+    info = InMemoryAccountInfo()
+    b2_api = B2Api(info)
+    b2_api.authorize_account("production", B2_KEY_ID, B2_APPLICATION_KEY)
+    bucket = b2_api.get_bucket_by_name(B2_BUCKET_NAME)
 
     zip_path = "db.zip"
-    with open(zip_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+    downloaded_file = bucket.download_file_by_name(DB_ZIP_FILENAME)
+    downloaded_file.save_to(zip_path)
 
     print("Extracting...")
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
