@@ -3,8 +3,8 @@ import zipfile
 from b2sdk.v2 import InMemoryAccountInfo, B2Api
 
 DB_PATH = os.getenv("CHROMA_DB_PATH", "db")
-B2_KEY_ID = os.getenv("B2_KEY_ID")
-B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")
+B2_KEY_ID = os.getenv("B2_DB_KEY_ID")
+B2_APPLICATION_KEY = os.getenv("B2_DB_APPLICATION_KEY")
 B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME", "Synora")
 DB_ZIP_FILENAME = os.getenv("DB_ZIP_FILENAME", "db.zip")
 
