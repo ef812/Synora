@@ -1,5 +1,5 @@
 from b2sdk.v2 import InMemoryAccountInfo, B2Api
-from config import B2_KEY_ID, B2_APPLICATION_KEY, B2_INSTALLERS_BUCKET_NAME, DOWNLOAD_URL_VALID_SECONDS
+from config import B2_INSTALLERS_KEY_ID, B2_INSTALLERS_APPLICATION_KEY, B2_INSTALLERS_BUCKET_NAME, DOWNLOAD_URL_VALID_SECONDS
 
 _info = InMemoryAccountInfo()
 _api = B2Api(_info)
@@ -9,7 +9,7 @@ _authorized = False
 def _ensure_authorized():
     global _authorized
     if not _authorized:
-        _api.authorize_account("production", B2_KEY_ID, B2_APPLICATION_KEY)
+        _api.authorize_account("production", B2_INSTALLERS_KEY_ID, B2_INSTALLERS_APPLICATION_KEY)
         _authorized = True
 
 
